@@ -1,5 +1,7 @@
 # lfc-autovideo
 
+[English](README.en.md) | 简体中文
+
 一个面向授权内容的本地 Python 命令行工具：输入 YouTube 链接或本地视频，使用
 `faster-whisper` 在本机生成英文字幕；你在 CSV 中手动填写中文翻译后，再用 FFmpeg
 生成带中英双语字幕的成片。
