@@ -1,0 +1,31 @@
+{
+  "jobs_dir": "jobs",
+  "download": {
+    "max_height": 1080
+  },
+  "transcription": {
+    "model": "small.en",
+    "device": "cpu",
+    "compute_type": "int8",
+    "language": "en",
+    "beam_size": 5,
+    "vad_filter": true,
+    "initial_prompt": "Liverpool FC football discussion. Preserve player names, manager names, club names, competitions, scorelines, and tactical terminology.",
+    "max_chars": 84,
+    "max_duration": 6.0
+  },
+  "subtitles": {
+    "font_name": "PingFang SC",
+    "chinese_font_size": 48,
+    "english_font_size": 30,
+    "margin_vertical": 58,
+    "outline": 3,
+    "shadow": 1
+  },
+  "render": {
+    "video_encoder": "libx264",
+    "preset": "medium",
+    "crf": 20,
+    "audio_bitrate": "192k"
+  }
+}

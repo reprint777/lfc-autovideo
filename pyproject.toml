@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lfc-autovideo"
+version = "0.1.0"
+description = "Local-first CLI for preparing authorized football videos with bilingual subtitles"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+  { name = "lfc-autovideo contributors" },
+]
+dependencies = [
+  "faster-whisper>=1.0,<2",
+  "yt-dlp[default]>=2025.11.12",
+]
+
+[project.scripts]
+autovideo = "autovideo.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["autovideo*"]
+
+[tool.setuptools]
+package-dir = { "" = "src" }

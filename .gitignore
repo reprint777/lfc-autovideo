@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments and local settings
+.venv/
+venv/
+.env
+config.json
+
+# Generated jobs may contain copyrighted source media and private rights records.
+jobs/
+
+# Downloaded media, subtitles, and renders
+*.mp4
+*.mkv
+*.webm
+*.mov
+*.mp3
+*.m4a
+*.wav
+*.aac
+*.srt
+*.ass
+*.vtt
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
