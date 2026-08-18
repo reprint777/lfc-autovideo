@@ -55,6 +55,15 @@ def _parser() -> argparse.ArgumentParser:
     vad_group.add_argument("--no-vad", dest="vad_filter", action="store_false")
     retranscribe.set_defaults(vad_filter=None)
 
+    repair_gaps = commands.add_parser(
+        "repair-gaps", help="只对现有字幕中的非静音空档做错位窗口补录"
+    )
+    repair_gaps.add_argument("job_dir", help="已有任务目录")
+    repair_gaps.add_argument("--model", help="覆盖本地 Whisper 模型")
+    repair_gaps.add_argument("--device", help="覆盖本地推理设备")
+    repair_gaps.add_argument("--compute-type", help="覆盖计算类型")
+    repair_gaps.add_argument("--hotwords", help="英文专名提示，建议用逗号分隔")
+
     render = commands.add_parser("render", help="读取人工翻译 CSV 并生成双语成片")
     render.add_argument("job_dir", help="prepare 生成的任务目录")
     render.add_argument(
@@ -166,6 +175,36 @@ def main(argv: Sequence[str] | None = None) -> int:
             review = manifest.get("paths", {}).get("transcription_review")
             if review:
                 print(f"空档检查：{job_dir / review}")
+            return 0
+        if args.command == "repair-gaps":
+            from .job import load_job
+            from .pipeline import repair_job_gaps
+
+            if not args.config:
+                stored = load_job(Path(args.job_dir)).get("config")
+                config = merge_config(stored if isinstance(stored, dict) else None)
+            for option, key in (
+                (args.model, "model"),
+                (args.device, "device"),
+                (args.compute_type, "compute_type"),
+                (args.hotwords, "hotwords"),
+            ):
+                if option:
+                    config["transcription"][key] = option
+            job_dir, manifest, backup, recovered = repair_job_gaps(
+                args.job_dir, config
+            )
+            if recovered:
+                print(f"已补回 {recovered} 个非静音空档：{job_dir}")
+                print(f"校对/翻译文件：{job_dir / manifest['paths']['translation_csv']}")
+                print(
+                    "补录复核报告："
+                    f"{job_dir / manifest['paths']['transcription_recovery']}"
+                )
+                if backup:
+                    print(f"旧字幕备份：{backup}")
+            else:
+                print("没有找到达到置信度要求的可补录内容；现有字幕未改动。")
             return 0
         if args.command == "render":
             from .pipeline import render_job

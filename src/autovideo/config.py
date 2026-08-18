@@ -46,6 +46,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "review_gap_seconds": 2.0,
         "review_silence_noise_db": -35.0,
         "review_silence_min_duration": 0.6,
+        "gap_recovery": True,
+        "recovery_left_padding_seconds": [1.5, 6.0],
+        "recovery_right_padding_seconds": 2.0,
+        "recovery_min_probability": 0.45,
+        "recovery_min_coverage_ratio": 0.35,
+        "recovery_max_gap_seconds": 30.0,
     },
     "subtitles": {
         "font_name": _default_font(),

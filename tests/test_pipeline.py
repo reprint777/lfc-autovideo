@@ -9,7 +9,7 @@ from autovideo.config import load_config
 from autovideo.errors import AutovideoError
 from autovideo.job import create_job, load_job, relative_to_job, save_job
 from autovideo.models import Cue
-from autovideo.pipeline import prepare_job, render_job, retranscribe_job
+from autovideo.pipeline import prepare_job, render_job, repair_job_gaps, retranscribe_job
 from autovideo.subtitles import write_translation_csv
 from autovideo.subtitles import cue_timeline_digest
 
@@ -166,6 +166,56 @@ class PipelineTests(unittest.TestCase):
             self.assertIn("New transcript", previous.read_text(encoding="utf-8-sig"))
             self.assertEqual(updated["state"], "waiting_for_translation")
             transcribe.assert_called_once()
+
+    def test_repair_gaps_preserves_existing_translation_and_backs_up(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = load_config()
+            job_dir, manifest = create_job(
+                root / "jobs", "input.mp4", rights_confirmed=True, config=config
+            )
+            audio = job_dir / "audio" / "speech.wav"
+            audio.write_bytes(b"audio")
+            translation = job_dir / "subtitles" / "translation.csv"
+            original = [Cue(0, 1, "Before", "之前"), Cue(4, 5, "After", "之后")]
+            write_translation_csv(original, translation)
+            manifest["paths"] = {
+                "audio": relative_to_job(job_dir, audio),
+                "translation_csv": relative_to_job(job_dir, translation),
+            }
+            manifest["transcription"] = {"cue_count": 2}
+            save_job(job_dir, manifest)
+            repaired = [
+                original[0],
+                Cue(1.2, 3.5, "Recovered words"),
+                original[1],
+            ]
+            items = [
+                {
+                    "gap_start": 1,
+                    "gap_end": 4,
+                    "cue_count": 1,
+                    "word_count": 2,
+                    "average_probability": "0.900",
+                    "coverage_ratio": "0.767",
+                    "text": "Recovered words",
+                }
+            ]
+            with (
+                patch(
+                    "autovideo.pipeline.repair_gaps_local",
+                    return_value=(repaired, items),
+                ),
+                patch("autovideo.review.detect_silences", return_value=[]),
+            ):
+                _, updated, backup, count = repair_job_gaps(job_dir, config)
+
+            loaded = translation.read_text(encoding="utf-8-sig")
+            self.assertEqual(count, 1)
+            self.assertIsNotNone(backup)
+            self.assertIn("之前", loaded)
+            self.assertIn("Recovered words", loaded)
+            self.assertEqual(updated["transcription"]["recovered_gap_count"], 1)
 
 
 if __name__ == "__main__":

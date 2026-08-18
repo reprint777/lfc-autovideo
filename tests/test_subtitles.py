@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from autovideo.models import Cue
+from autovideo.review import GapReview
 from autovideo.subtitles import (
     cue_source_digest,
     cue_timeline_digest,
@@ -25,15 +26,17 @@ from autovideo.transcribe import (
     build_cues_from_words,
     cues_from_segments,
     normalize_transcript_text,
+    recover_suspicious_gaps,
     transcribe_local,
 )
 
 
 @dataclass
 class Word:
-    start: float
-    end: float
+    start: float | None
+    end: float | None
     word: str
+    probability: float = 0.9
 
 
 @dataclass
@@ -168,6 +171,43 @@ class SubtitleTests(unittest.TestCase):
             cues_from_segments([segment]),
             [Cue(0, 2, "Nothing from this segment is dropped.")],
         )
+
+    def test_shifted_gap_recovery_keeps_only_words_inside_original_gap(self) -> None:
+        class RecoveryModel:
+            calls: list[dict[str, object]] = []
+
+            def transcribe(self, _path: str, **kwargs: object):
+                self.calls.append(kwargs)
+                segment = Segment(
+                    8,
+                    21,
+                    "neighbor recovered words neighbor",
+                    [
+                        Word(9.0, 9.5, "neighbor"),
+                        Word(10.5, 11.0, " recovered"),
+                        Word(11.0, 12.0, " words"),
+                        Word(20.2, 20.8, " neighbor"),
+                    ],
+                )
+                return iter([segment]), object()
+
+        model = RecoveryModel()
+        original = [Cue(0, 10, "Before"), Cue(20, 25, "After")]
+        gaps = [GapReview(1, 2, 10, 20, 0, 10, "check_content")]
+        merged, items = recover_suspicious_gaps(
+            model,
+            "audio.wav",
+            original,
+            gaps,
+            minimum_coverage_ratio=0.1,
+        )
+
+        self.assertEqual(
+            [cue.english for cue in merged], ["Before", "recovered words", "After"]
+        )
+        self.assertEqual(len(items), 1)
+        self.assertIsNone(model.calls[0]["no_speech_threshold"])
+        self.assertEqual(model.calls[0]["clip_timestamps"], [8.5, 22.0])
 
     def test_faster_whisper_is_imported_only_when_transcribing(self) -> None:
         fake_segment = Segment(

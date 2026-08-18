@@ -7,7 +7,7 @@ heavy transcription dependency installed.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 import re
 from typing import Any
@@ -202,6 +202,207 @@ def _info_to_dict(info: object) -> dict[str, object]:
     return result
 
 
+def recover_suspicious_gaps(
+    model: object,
+    audio_path: str | Path,
+    cues: Iterable[Cue],
+    gaps: Iterable[object],
+    *,
+    language: str | None = "en",
+    initial_prompt: str | None = None,
+    hotwords: str | None = None,
+    beam_size: int = 5,
+    left_padding_seconds: Sequence[float] = (1.5, 6.0),
+    right_padding_seconds: float = 2.0,
+    minimum_probability: float = 0.45,
+    minimum_coverage_ratio: float = 0.35,
+    maximum_gap_seconds: float = 30.0,
+    max_chars: int = 84,
+    max_duration: float = 6.0,
+) -> tuple[list[Cue], list[dict[str, object]]]:
+    """Recover audible gaps with shifted local decoding windows.
+
+    Whisper decoding is sensitive to its approximately 30-second window
+    boundaries.  Trying a small set of padded starts can recover speech that a
+    full-file pass skipped.  Only words whose midpoint is inside the original
+    gap are retained, which prevents duplicated neighboring subtitles.
+    """
+
+    original = sorted(cues, key=lambda cue: (cue.start, cue.end))
+    recovered: list[Cue] = []
+    review_items: list[dict[str, object]] = []
+    transcribe = getattr(model, "transcribe")
+
+    for gap in gaps:
+        if _value(gap, "status") != "check_content":
+            continue
+        gap_start = float(_value(gap, "start", 0.0))
+        gap_end = float(_value(gap, "end", gap_start))
+        gap_duration = gap_end - gap_start
+        if gap_duration <= 0 or gap_duration > maximum_gap_seconds:
+            continue
+
+        best: tuple[tuple[float, float, int], list[Cue], int, float, float] | None = None
+        for raw_padding in left_padding_seconds:
+            clip_start = max(0.0, gap_start - max(0.0, float(raw_padding)))
+            clip_end = gap_end + max(0.0, float(right_padding_seconds))
+            options: dict[str, object] = {
+                "word_timestamps": True,
+                "vad_filter": False,
+                "beam_size": int(beam_size),
+                "condition_on_previous_text": False,
+                "clip_timestamps": [clip_start, clip_end],
+                # This recovery pass is already restricted to measured audible
+                # gaps. Disable the decoder's independent silence shortcut.
+                "no_speech_threshold": None,
+                "temperature": 0.0,
+            }
+            if language:
+                options["language"] = language
+            if initial_prompt:
+                options["initial_prompt"] = initial_prompt
+            if hotwords:
+                options["hotwords"] = hotwords
+
+            segments, _info = transcribe(str(Path(audio_path).expanduser()), **options)
+            selected_words: list[dict[str, object]] = []
+            probabilities: list[float] = []
+            for segment in segments:
+                for word in list(_value(segment, "words", None) or []):
+                    raw_start = _value(word, "start")
+                    raw_end = _value(word, "end")
+                    text = str(_value(word, "word", "") or "")
+                    if raw_start is None or raw_end is None or not text.strip():
+                        continue
+                    word_start = float(raw_start)
+                    word_end = float(raw_end)
+                    midpoint = (word_start + word_end) / 2
+                    if midpoint < gap_start or midpoint > gap_end:
+                        continue
+                    clipped_start = max(gap_start, word_start)
+                    clipped_end = min(gap_end, word_end)
+                    if clipped_end <= clipped_start:
+                        continue
+                    selected_words.append(
+                        {"start": clipped_start, "end": clipped_end, "word": text}
+                    )
+                    probability = _value(word, "probability")
+                    if probability is not None:
+                        probabilities.append(float(probability))
+
+            candidate = build_cues_from_words(
+                selected_words,
+                max_chars=max_chars,
+                max_duration=max_duration,
+            )
+            word_count = len(selected_words)
+            average_probability = (
+                sum(probabilities) / len(probabilities) if probabilities else 0.5
+            )
+            coverage_ratio = (
+                (candidate[-1].end - candidate[0].start) / gap_duration
+                if candidate
+                else 0.0
+            )
+            if (
+                word_count < 2
+                or average_probability < minimum_probability
+                or coverage_ratio < minimum_coverage_ratio
+            ):
+                continue
+            score = (coverage_ratio, average_probability, word_count)
+            if best is None or score > best[0]:
+                best = (
+                    score,
+                    candidate,
+                    word_count,
+                    average_probability,
+                    coverage_ratio,
+                )
+            if coverage_ratio >= 0.75:
+                break
+
+        if best is None:
+            continue
+        _score, candidate, word_count, average_probability, coverage_ratio = best
+        recovered.extend(candidate)
+        review_items.append(
+            {
+                "gap_start": gap_start,
+                "gap_end": gap_end,
+                "cue_count": len(candidate),
+                "word_count": word_count,
+                "average_probability": f"{average_probability:.3f}",
+                "coverage_ratio": f"{coverage_ratio:.3f}",
+                "text": " ".join(cue.english for cue in candidate),
+            }
+        )
+
+    merged = original + recovered
+    merged.sort(key=lambda cue: (cue.start, cue.end))
+    return merged, review_items
+
+
+def repair_gaps_local(
+    audio_path: str | Path,
+    cues: Iterable[Cue],
+    *,
+    model_size: str = "medium.en",
+    device: str = "auto",
+    compute_type: str = "default",
+    language: str | None = "en",
+    initial_prompt: str | None = None,
+    hotwords: str | None = None,
+    beam_size: int = 5,
+    gap_seconds: float = 2.0,
+    silence_noise_db: float = -35.0,
+    silence_min_duration: float = 0.6,
+    left_padding_seconds: Sequence[float] = (1.5, 6.0),
+    right_padding_seconds: float = 2.0,
+    minimum_probability: float = 0.45,
+    minimum_coverage_ratio: float = 0.35,
+    maximum_gap_seconds: float = 30.0,
+    max_chars: int = 84,
+    max_duration: float = 6.0,
+) -> tuple[list[Cue], list[dict[str, object]]]:
+    """Repair gaps in an existing transcript without retranscribing the full file."""
+
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError(
+            "Local transcription requires faster-whisper. Install the project's "
+            "transcription dependencies before running this command."
+        ) from exc
+    from .media import detect_silences
+    from .review import analyze_gaps
+
+    model = WhisperModel(str(model_size), device=str(device), compute_type=str(compute_type))
+    silences = detect_silences(
+        audio_path,
+        noise_db=float(silence_noise_db),
+        min_duration=float(silence_min_duration),
+    )
+    gaps = analyze_gaps(cues, silences, min_gap=float(gap_seconds))
+    return recover_suspicious_gaps(
+        model,
+        audio_path,
+        cues,
+        gaps,
+        language=language,
+        initial_prompt=initial_prompt,
+        hotwords=hotwords,
+        beam_size=beam_size,
+        left_padding_seconds=left_padding_seconds,
+        right_padding_seconds=right_padding_seconds,
+        minimum_probability=minimum_probability,
+        minimum_coverage_ratio=minimum_coverage_ratio,
+        maximum_gap_seconds=maximum_gap_seconds,
+        max_chars=max_chars,
+        max_duration=max_duration,
+    )
+
+
 def transcribe_local(
     audio_path: str | Path,
     model_size: str = "medium.en",
@@ -216,6 +417,15 @@ def transcribe_local(
     vad_speech_pad_ms: int = 600,
     condition_on_previous_text: bool = False,
     hotwords: str | None = None,
+    recover_gaps: bool = True,
+    recovery_gap_seconds: float = 2.0,
+    recovery_silence_noise_db: float = -35.0,
+    recovery_silence_min_duration: float = 0.6,
+    recovery_left_padding_seconds: Sequence[float] = (1.5, 6.0),
+    recovery_right_padding_seconds: float = 2.0,
+    recovery_min_probability: float = 0.45,
+    recovery_min_coverage_ratio: float = 0.35,
+    recovery_max_gap_seconds: float = 30.0,
     max_chars: int = 84,
     max_duration: float = 6.0,
 ) -> tuple[list[Cue], dict[str, object]]:
@@ -260,6 +470,41 @@ def transcribe_local(
         max_duration=float(max_duration),
     )
     metadata = _info_to_dict(info)
+    recovery_items: list[dict[str, object]] = []
+    if recover_gaps and cues:
+        try:
+            from .media import detect_silences
+            from .review import analyze_gaps
+
+            silences = detect_silences(
+                audio_path,
+                noise_db=float(recovery_silence_noise_db),
+                min_duration=float(recovery_silence_min_duration),
+            )
+            gaps = analyze_gaps(
+                cues,
+                silences,
+                min_gap=float(recovery_gap_seconds),
+            )
+            cues, recovery_items = recover_suspicious_gaps(
+                model,
+                audio_path,
+                cues,
+                gaps,
+                language=language,
+                initial_prompt=initial_prompt,
+                hotwords=hotwords,
+                beam_size=beam_size,
+                left_padding_seconds=recovery_left_padding_seconds,
+                right_padding_seconds=recovery_right_padding_seconds,
+                minimum_probability=recovery_min_probability,
+                minimum_coverage_ratio=recovery_min_coverage_ratio,
+                maximum_gap_seconds=recovery_max_gap_seconds,
+                max_chars=max_chars,
+                max_duration=max_duration,
+            )
+        except Exception as exc:  # Recovery must not discard the primary transcript.
+            metadata["recovery_error"] = str(exc)
     metadata.update(
         {
             "model": str(model_size),
@@ -268,7 +513,14 @@ def transcribe_local(
             "beam_size": int(beam_size),
             "vad_filter": bool(vad_filter),
             "condition_on_previous_text": bool(condition_on_previous_text),
+            "gap_recovery": bool(recover_gaps),
+            "recovered_gap_count": len(recovery_items),
         }
+    )
+    # Keep detailed recovered text out of job.json; the pipeline exports it to CSV.
+    metadata["recovery_items"] = recovery_items
+    metadata["recovered_cue_count"] = sum(
+        int(item["cue_count"]) for item in recovery_items
     )
     if vad_filter:
         metadata["vad_parameters"] = dict(options["vad_parameters"])

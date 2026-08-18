@@ -179,6 +179,9 @@ jobs/<job-id>/subtitles/transcript.en.srt
 Also inspect `transcription.review.csv`. A `check_content` row means a subtitle
 gap still contains audible audio and should be reviewed; `likely_silence` is
 usually a real pause. The report never invents or inserts text automatically.
+By default, the pipeline also retries `check_content` gaps with shifted local
+windows and merges candidates that pass confidence checks. Every inserted cue
+is listed in `transcription.recovery.csv` and must be reviewed manually.
 
 ### Retranscribe an existing job
 
@@ -198,6 +201,19 @@ autovideo retranscribe --no-vad "jobs/<job-id>"
 Before retranscription, current subtitle files are copied to
 `subtitles/backups/<timestamp>/`. Disabling VAD can produce text during true
 silence, so use it for missed-speech cases and review the result manually.
+
+When a full transcript already exists, repair only its audible gaps instead of
+running the entire model again:
+
+```bash
+autovideo --config config.json repair-gaps \
+  --hotwords "Szoboszlai, Wirtz, Liverpool, Anfield" "jobs/<job-id>"
+```
+
+This preserves existing English corrections and Chinese translations, backs up
+the subtitle package, and inserts only candidates that pass confidence and
+coverage checks. Whisper is sensitive to the start of its roughly 30-second
+decoding windows, so the repair pass tries overlapping shifted starts.
 
 ### Render the bilingual video
 
@@ -243,6 +259,7 @@ jobs/
     │   ├── transcript.en.srt       # English transcript
     │   ├── translation.csv         # Correct english and fill in chinese
     │   ├── transcription.review.csv # Audible subtitle-gap report
+    │   ├── transcription.recovery.csv # Inserted cues requiring review
     │   ├── backups/                # Subtitles saved before retranscription
     │   ├── subtitle.bilingual.srt  # Editable bilingual subtitles
     │   └── subtitle.bilingual.ass  # Styled subtitles used for burn-in
@@ -284,6 +301,8 @@ ignored by Git.
 - `transcription.max_chars` / `max_duration`: maximum subtitle length and
   duration before splitting.
 - `transcription.review_*`: gap-report and silence-detection thresholds.
+- `transcription.gap_recovery` / `recovery_*`: shifted-window repair,
+  confidence, coverage, padding, and maximum-gap settings.
 - `subtitles`: font, Chinese and English sizes, margin, outline, and shadow.
 - `render`: FFmpeg video encoder, preset, CRF quality, and audio bitrate. A
   lower CRF usually means higher quality and a larger file.
@@ -356,9 +375,11 @@ cell empty and render with `--allow-missing-chinese`.
 ### Speech is audible but a subtitle section is missing
 
 Review `check_content` rows in `transcription.review.csv`. If speech is truly
-missing, run `autovideo retranscribe --no-vad "jobs/<job-id>"`. If only proper
-names are wrong, keep VAD enabled and pass the current names with `--hotwords`.
-Always review the new transcript, especially over music or overlapping voices.
+missing, run `autovideo --config config.json repair-gaps "jobs/<job-id>"`.
+Do not assume `--no-vad` is always more complete: changed decoding boundaries
+can recover one passage while losing another. If only proper names are wrong,
+pass the current names with `--hotwords`. Review `transcription.recovery.csv`,
+especially for music or overlapping voices.
 
 ### Subtitle styling, quality, or file size is unsuitable
 

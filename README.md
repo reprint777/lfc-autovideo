@@ -148,6 +148,8 @@ index,start,end,english,chinese
 
 同时检查 `transcription.review.csv`：`check_content` 表示字幕空档中仍有明显声音，应回听；
 `likely_silence` 通常是真实停顿。报告只是校对提示，不会自动捏造或插入文字。
+默认流程还会用错位起点对 `check_content` 空档做局部二次识别，将达到置信度要求的结果合并
+进字幕。所有自动补回的文字都会写入 `transcription.recovery.csv`，必须人工复核。
 
 ### 复用已有音频重新转写
 
@@ -166,6 +168,17 @@ autovideo retranscribe --no-vad "jobs/<任务ID>"
 
 每次重新转写前，现有字幕会自动复制到 `subtitles/backups/<时间>/`，不会直接丢失已完成的
 英文校对或中文翻译。关闭 VAD 可能带来静音段幻觉，因此只建议用于漏识别任务并人工复核。
+
+如果已经完成全片转写，只想修复当前字幕的非静音空档，运行更快的局部补洞命令：
+
+```bash
+autovideo --config config.json repair-gaps \
+  --hotwords "Szoboszlai, Wirtz, Liverpool, Anfield" "jobs/<任务ID>"
+```
+
+它会保留现有英文校正和中文翻译，只插入通过置信度与覆盖率检查的缺失字幕，并在写入前
+自动备份。Whisper 对约 30 秒解码窗口的起点敏感，因此局部补洞会尝试多个带重叠的错位
+起点；这比反复切换整片 VAD 更可靠。
 
 ### 生成双语成片
 
@@ -203,6 +216,7 @@ jobs/
     │   ├── transcript.en.srt       # 英文转写字幕
     │   ├── translation.csv         # 校正 english 并填写 chinese
     │   ├── transcription.review.csv # 非静音字幕空档检查
+    │   ├── transcription.recovery.csv # 自动补回内容的人工复核清单
     │   ├── backups/                # 重新转写前的字幕备份
     │   ├── subtitle.bilingual.srt  # 可编辑双语字幕
     │   └── subtitle.bilingual.ass  # 用于排版/压制的双语字幕
@@ -236,6 +250,8 @@ jobs/
 - `transcription.initial_prompt`：帮助识别利物浦相关专名的英文上下文提示。
 - `transcription.max_chars` / `max_duration`：字幕拆分的最大字符数和时长。
 - `transcription.review_*`：空档报告的最短空档和静音检测参数。
+- `transcription.gap_recovery` / `recovery_*`：控制局部错位窗口补洞、最低词置信度、
+  覆盖率、边界填充和最大处理空档。
 - `subtitles`：双语字幕字体、两种语言的字号、边距、描边和阴影。
 - `render`：FFmpeg 视频编码器、预设、CRF 质量和音频码率。CRF 越低通常质量越高、
   文件越大。
@@ -300,8 +316,10 @@ autovideo doctor
 ### 明明有说话但字幕跳过一段
 
 先查看 `transcription.review.csv` 中的 `check_content` 行并回听对应时间。确认漏识别后运行
-`autovideo retranscribe --no-vad "jobs/<任务ID>"`；如果只有专名错误，优先保留 VAD 并用
-`--hotwords` 加入当期球员姓名。重新转写后仍须人工从头检查，尤其是背景音乐和多人重叠语音。
+`autovideo --config config.json repair-gaps "jobs/<任务ID>"`。不要把 `--no-vad` 当作一定更完整：
+它会改变 Whisper 的解码窗口，可能补回一段却漏掉另一段。如果只有专名错误，用
+`--hotwords` 加入当期球员姓名。补洞后检查 `transcription.recovery.csv`，尤其留意背景音乐
+和多人重叠语音。
 
 ### 字幕样式正确但画面质量或文件体积不合适
 
