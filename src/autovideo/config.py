@@ -23,18 +23,35 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_height": 1080,
     },
     "transcription": {
-        "model": "small.en",
+        "model": "medium.en",
         "device": "cpu",
         "compute_type": "int8",
         "language": "en",
         "beam_size": 5,
+        "condition_on_previous_text": False,
         "vad_filter": True,
+        "vad_threshold": 0.35,
+        "vad_min_silence_duration_ms": 2000,
+        "vad_speech_pad_ms": 600,
+        "hotwords": (
+            "Liverpool FC, Liverpool, Anfield, Arne Slot, Premier League, "
+            "Champions League"
+        ),
         "initial_prompt": (
             "Liverpool FC football discussion. Preserve player names, manager names, "
             "club names, competitions, scorelines, and tactical terminology."
         ),
         "max_chars": 84,
         "max_duration": 6.0,
+        "review_gap_seconds": 2.0,
+        "review_silence_noise_db": -35.0,
+        "review_silence_min_duration": 0.6,
+        "gap_recovery": True,
+        "recovery_left_padding_seconds": [1.5, 6.0],
+        "recovery_right_padding_seconds": 2.0,
+        "recovery_min_probability": 0.45,
+        "recovery_min_coverage_ratio": 0.35,
+        "recovery_max_gap_seconds": 30.0,
     },
     "subtitles": {
         "font_name": _default_font(),
@@ -62,8 +79,15 @@ def _merge(base: dict[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
     return base
 
 
-def load_config(path: str | Path | None = None) -> dict[str, Any]:
+def merge_config(override: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Return current defaults merged with a full or legacy config snapshot."""
+
     config = copy.deepcopy(DEFAULT_CONFIG)
+    return _merge(config, override) if override else config
+
+
+def load_config(path: str | Path | None = None) -> dict[str, Any]:
+    config = merge_config()
     if path is None:
         return config
 

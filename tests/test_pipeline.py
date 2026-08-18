@@ -9,9 +9,9 @@ from autovideo.config import load_config
 from autovideo.errors import AutovideoError
 from autovideo.job import create_job, load_job, relative_to_job, save_job
 from autovideo.models import Cue
-from autovideo.pipeline import prepare_job, render_job
+from autovideo.pipeline import prepare_job, render_job, repair_job_gaps, retranscribe_job
 from autovideo.subtitles import write_translation_csv
-from autovideo.subtitles import cue_source_digest
+from autovideo.subtitles import cue_timeline_digest
 
 
 class PipelineTests(unittest.TestCase):
@@ -97,7 +97,7 @@ class PipelineTests(unittest.TestCase):
             self.assertIn("Hello", ass)
             self.assertEqual(load_job(job_dir)["state"], "completed")
 
-    def test_render_rejects_edited_read_only_translation_columns(self) -> None:
+    def test_render_allows_edited_english_but_locks_timeline(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             config = load_config()
@@ -115,14 +115,107 @@ class PipelineTests(unittest.TestCase):
             }
             manifest["transcription"] = {
                 "cue_count": 1,
-                "cue_source_sha256": cue_source_digest(original),
+                "cue_timeline_sha256": cue_timeline_digest(original),
             }
             save_job(job_dir, manifest)
 
-            with self.assertRaisesRegex(AutovideoError, "英文原文已被修改"):
-                render_job(job_dir)
+            def fake_render(_source, _ass, output, _config):
+                Path(output).write_bytes(b"rendered")
+                return Path(output)
 
+            with patch("autovideo.pipeline.render_video", side_effect=fake_render):
+                output, _, _ = render_job(job_dir)
+            self.assertEqual(output.read_bytes(), b"rendered")
+
+            write_translation_csv([Cue(0.1, 1, "Changed", "译文")], csv_path)
+            with self.assertRaisesRegex(AutovideoError, "时间轴已被修改"):
+                render_job(job_dir)
             self.assertEqual(load_job(job_dir)["state"], "translation_needs_attention")
+
+    def test_retranscribe_reuses_audio_and_backs_up_previous_subtitles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = load_config()
+            job_dir, manifest = create_job(
+                root / "jobs", "input.mp4", rights_confirmed=True, config=config
+            )
+            audio = job_dir / "audio" / "speech.m4a"
+            audio.write_bytes(b"old audio")
+            previous = job_dir / "subtitles" / "translation.csv"
+            write_translation_csv([Cue(0, 1, "Old", "旧")], previous)
+            manifest["paths"] = {
+                "audio": relative_to_job(job_dir, audio),
+                "translation_csv": relative_to_job(job_dir, previous),
+            }
+            save_job(job_dir, manifest)
+
+            cues = [Cue(0, 1.2, "New transcript")]
+            with (
+                patch(
+                    "autovideo.pipeline.transcribe_local",
+                    return_value=(cues, {"language": "en"}),
+                ) as transcribe,
+                patch(
+                    "autovideo.review.detect_silences", return_value=[]
+                ),
+            ):
+                _, updated, backup = retranscribe_job(job_dir, config)
+
+            self.assertIsNotNone(backup)
+            self.assertTrue((backup / "translation.csv").is_file())  # type: ignore[operator]
+            self.assertIn("New transcript", previous.read_text(encoding="utf-8-sig"))
+            self.assertEqual(updated["state"], "waiting_for_translation")
+            transcribe.assert_called_once()
+
+    def test_repair_gaps_preserves_existing_translation_and_backs_up(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = load_config()
+            job_dir, manifest = create_job(
+                root / "jobs", "input.mp4", rights_confirmed=True, config=config
+            )
+            audio = job_dir / "audio" / "speech.wav"
+            audio.write_bytes(b"audio")
+            translation = job_dir / "subtitles" / "translation.csv"
+            original = [Cue(0, 1, "Before", "之前"), Cue(4, 5, "After", "之后")]
+            write_translation_csv(original, translation)
+            manifest["paths"] = {
+                "audio": relative_to_job(job_dir, audio),
+                "translation_csv": relative_to_job(job_dir, translation),
+            }
+            manifest["transcription"] = {"cue_count": 2}
+            save_job(job_dir, manifest)
+            repaired = [
+                original[0],
+                Cue(1.2, 3.5, "Recovered words"),
+                original[1],
+            ]
+            items = [
+                {
+                    "gap_start": 1,
+                    "gap_end": 4,
+                    "cue_count": 1,
+                    "word_count": 2,
+                    "average_probability": "0.900",
+                    "coverage_ratio": "0.767",
+                    "text": "Recovered words",
+                }
+            ]
+            with (
+                patch(
+                    "autovideo.pipeline.repair_gaps_local",
+                    return_value=(repaired, items),
+                ),
+                patch("autovideo.review.detect_silences", return_value=[]),
+            ):
+                _, updated, backup, count = repair_job_gaps(job_dir, config)
+
+            loaded = translation.read_text(encoding="utf-8-sig")
+            self.assertEqual(count, 1)
+            self.assertIsNotNone(backup)
+            self.assertIn("之前", loaded)
+            self.assertIn("Recovered words", loaded)
+            self.assertEqual(updated["transcription"]["recovered_gap_count"], 1)
 
 
 if __name__ == "__main__":

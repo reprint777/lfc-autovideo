@@ -25,8 +25,8 @@ processed offline after the model has been cached.
 1. Run `autovideo doctor` to check Python, FFmpeg, and runtime dependencies.
 2. Run `autovideo prepare` with a YouTube URL or local video. The command
    prepares the media and transcribes the English speech locally.
-3. Open `jobs/<job-id>/subtitles/translation.csv`, edit only the `chinese`
-   column, and save it.
+3. Review `transcription.review.csv`, then correct English and add Chinese in
+   `translation.csv`.
 4. Run `autovideo render` to create bilingual subtitle files and a burned-in
    MP4.
 5. Review the subtitles, rights, attribution, and upload details before
@@ -39,10 +39,10 @@ Numbers, and common text editors. Its columns are fixed:
 index,start,end,english,chinese
 ```
 
-Do not modify the header or the `index`, `start`, `end`, or `english` columns.
-Do not add, delete, or reorder rows. Enter the translation only in the
-corresponding `chinese` cell. If text contains commas, let your spreadsheet
-application preserve the CSV quoting.
+Do not modify the header or the `index`, `start`, or `end` columns. Do not add,
+delete, or reorder rows. You may correct names, spelling, and punctuation in
+`english`, and enter the translation in `chinese`. Let your spreadsheet
+application preserve CSV quoting around text containing commas.
 
 ## macOS Apple Silicon installation
 
@@ -100,10 +100,9 @@ source .venv/bin/activate
 autovideo init-config config.json
 ```
 
-The default `small.en` model offers a practical balance of speed, memory use,
-and English recognition quality. In `config.json`, you can switch to `tiny.en`
-for more speed and lower quality, or `medium.en` for higher quality and slower
-processing. A new model is downloaded from Hugging Face on first use and stored
+The default `medium.en` model prioritizes names and football terminology. In
+`config.json`, you can switch to `small.en` for faster, lower-quality results.
+A new model is downloaded from Hugging Face on first use and stored
 in your user cache. The download is not cloud transcription; inference remains
 local after the model is available.
 
@@ -148,11 +147,12 @@ Quote paths containing spaces. Absolute paths are recommended. FFmpeg handles
 common inputs such as MP4, MOV, MKV, and WebM.
 
 You can override selected transcription settings for one job with `--model`,
-`--device`, `--compute-type`, or `--jobs-dir`. For example:
+`--device`, `--compute-type`, `--hotwords`, `--no-vad`, or `--jobs-dir`:
 
 ```bash
 autovideo --config config.json prepare --confirm-rights --model medium.en \
-  --device cpu --compute-type int8 "/absolute/path/to/video.mp4"
+  --device cpu --compute-type int8 \
+  --hotwords "Szoboszlai, Wirtz, Liverpool, Anfield" "/absolute/path/to/video.mp4"
 ```
 
 When `prepare` finishes, it prints the job ID and job directory. Edit this file
@@ -175,6 +175,45 @@ The English-only subtitle file is immediately available at:
 ```text
 jobs/<job-id>/subtitles/transcript.en.srt
 ```
+
+Also inspect `transcription.review.csv`. A `check_content` row means a subtitle
+gap still contains audible audio and should be reviewed; `likely_silence` is
+usually a real pause. The report never invents or inserts text automatically.
+By default, the pipeline also retries `check_content` gaps with shifted local
+windows and merges candidates that pass confidence checks. Every inserted cue
+is listed in `transcription.recovery.csv` and must be reviewed manually.
+
+### Retranscribe an existing job
+
+Reuse an existing job's audio without downloading the video again:
+
+```bash
+autovideo retranscribe --model medium.en \
+  --hotwords "Szoboszlai, Wirtz, Liverpool, Anfield" "jobs/<job-id>"
+```
+
+If an audible section is still skipped, retry without VAD:
+
+```bash
+autovideo retranscribe --no-vad "jobs/<job-id>"
+```
+
+Before retranscription, current subtitle files are copied to
+`subtitles/backups/<timestamp>/`. Disabling VAD can produce text during true
+silence, so use it for missed-speech cases and review the result manually.
+
+When a full transcript already exists, repair only its audible gaps instead of
+running the entire model again:
+
+```bash
+autovideo --config config.json repair-gaps \
+  --hotwords "Szoboszlai, Wirtz, Liverpool, Anfield" "jobs/<job-id>"
+```
+
+This preserves existing English corrections and Chinese translations, backs up
+the subtitle package, and inserts only candidates that pass confidence and
+coverage checks. Whisper is sensitive to the start of its roughly 30-second
+decoding windows, so the repair pass tries overlapping shifted starts.
 
 ### Render the bilingual video
 
@@ -214,11 +253,14 @@ jobs/
     │   ├── video.<extension>       # Copied local file or downloaded video
     │   └── info.json               # Source metadata
     ├── audio/
-    │   └── speech.m4a              # Audio used for transcription
+    │   └── speech.wav              # Lossless PCM audio used for transcription
     ├── job.json                    # Job state, configuration, and paths
     ├── subtitles/
     │   ├── transcript.en.srt       # English transcript
-    │   ├── translation.csv         # Fill in the chinese column manually
+    │   ├── translation.csv         # Correct english and fill in chinese
+    │   ├── transcription.review.csv # Audible subtitle-gap report
+    │   ├── transcription.recovery.csv # Inserted cues requiring review
+    │   ├── backups/                # Subtitles saved before retranscription
     │   ├── subtitle.bilingual.srt  # Editable bilingual subtitles
     │   └── subtitle.bilingual.ass  # Styled subtitles used for burn-in
     └── output/
@@ -247,11 +289,20 @@ ignored by Git.
 - `transcription.compute_type`: defaults to `int8` to reduce memory use.
 - `transcription.language`: use `en` to force English recognition.
 - `transcription.beam_size`: larger values may improve results but take longer.
-- `transcription.vad_filter`: filters long silent sections.
+- `transcription.condition_on_previous_text`: disabled by default to reduce
+  repetition loops and timestamp drift.
+- `transcription.vad_filter`: filters long silent sections; retry with
+  `--no-vad` when speech was missed.
+- `transcription.vad_threshold`, `vad_min_silence_duration_ms`, and
+  `vad_speech_pad_ms`: tune VAD sensitivity and speech-edge padding.
+- `transcription.hotwords`: per-video player, manager, and club names.
 - `transcription.initial_prompt`: English context that helps preserve Liverpool
   player, manager, club, competition, scoreline, and tactical names.
 - `transcription.max_chars` / `max_duration`: maximum subtitle length and
   duration before splitting.
+- `transcription.review_*`: gap-report and silence-detection thresholds.
+- `transcription.gap_recovery` / `recovery_*`: shifted-window repair,
+  confidence, coverage, padding, and maximum-gap settings.
 - `subtitles`: font, Chinese and English sizes, margin, outline, and shadow.
 - `render`: FFmpeg video encoder, preset, CRF quality, and audio bitrate. A
   lower CRF usually means higher quality and a larger file.
@@ -320,6 +371,15 @@ timestamps into dates or numbers. Make a backup before repairing the file.
 Check every `chinese` cell, especially the final rows and short interjections.
 Do not delete those rows. To intentionally leave some cues in English, keep the
 cell empty and render with `--allow-missing-chinese`.
+
+### Speech is audible but a subtitle section is missing
+
+Review `check_content` rows in `transcription.review.csv`. If speech is truly
+missing, run `autovideo --config config.json repair-gaps "jobs/<job-id>"`.
+Do not assume `--no-vad` is always more complete: changed decoding boundaries
+can recover one passage while losing another. If only proper names are wrong,
+pass the current names with `--hotwords`. Review `transcription.recovery.csv`,
+especially for music or overlapping voices.
 
 ### Subtitle styling, quality, or file size is unsuitable
 

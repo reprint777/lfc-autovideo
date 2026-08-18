@@ -9,8 +9,10 @@ import unittest
 from unittest.mock import patch
 
 from autovideo.models import Cue
+from autovideo.review import GapReview
 from autovideo.subtitles import (
     cue_source_digest,
+    cue_timeline_digest,
     escape_ass_text,
     format_ass_timestamp,
     format_srt_timestamp,
@@ -20,14 +22,21 @@ from autovideo.subtitles import (
     write_srt,
     write_translation_csv,
 )
-from autovideo.transcribe import build_cues_from_words, cues_from_segments, transcribe_local
+from autovideo.transcribe import (
+    build_cues_from_words,
+    cues_from_segments,
+    normalize_transcript_text,
+    recover_suspicious_gaps,
+    transcribe_local,
+)
 
 
 @dataclass
 class Word:
-    start: float
-    end: float
+    start: float | None
+    end: float | None
     word: str
+    probability: float = 0.9
 
 
 @dataclass
@@ -104,6 +113,13 @@ class SubtitleTests(unittest.TestCase):
         self.assertEqual(cue_source_digest(cues), cue_source_digest(translated))
         self.assertNotEqual(cue_source_digest(cues), cue_source_digest(edited_english))
 
+    def test_timeline_digest_allows_english_corrections(self) -> None:
+        original = [Cue(0.123, 1.235, "Liver pool")]
+        corrected = [Cue(0.123, 1.235, "Liverpool", "利物浦")]
+        retimed = [Cue(0.2, 1.235, "Liverpool")]
+        self.assertEqual(cue_timeline_digest(original), cue_timeline_digest(corrected))
+        self.assertNotEqual(cue_timeline_digest(original), cue_timeline_digest(retimed))
+
     def test_zero_duration_cue_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "must be after"):
             Cue(1, 1, "No duration")
@@ -132,9 +148,66 @@ class SubtitleTests(unittest.TestCase):
         self.assertEqual([cue.english for cue in cues], ["Hello Liverpool fans!", "A new sentence."])
         self.assertEqual((cues[0].start, cues[0].end), (0.0, 1.1))
 
+    def test_broken_compound_hyphens_are_normalized(self) -> None:
+        self.assertEqual(
+            normalize_transcript_text("a 30 -year -old right -winger — maybe"),
+            "a 30-year-old right-winger — maybe",
+        )
+        words = [Word(0, 0.4, "right"), Word(0.4, 0.9, " -winger")]
+        self.assertEqual(build_cues_from_words(words)[0].english, "right-winger")
+
     def test_segment_without_words_is_preserved(self) -> None:
         cues = cues_from_segments([Segment(0, 2, "Fallback segment", None)])
         self.assertEqual(cues, [Cue(0, 2, "Fallback segment")])
+
+    def test_segment_with_partly_untimed_words_uses_full_segment_fallback(self) -> None:
+        segment = Segment(
+            0,
+            2,
+            "Nothing from this segment is dropped.",
+            [Word(0, 0.5, "Nothing"), Word(None, None, " dropped")],  # type: ignore[arg-type]
+        )
+        self.assertEqual(
+            cues_from_segments([segment]),
+            [Cue(0, 2, "Nothing from this segment is dropped.")],
+        )
+
+    def test_shifted_gap_recovery_keeps_only_words_inside_original_gap(self) -> None:
+        class RecoveryModel:
+            calls: list[dict[str, object]] = []
+
+            def transcribe(self, _path: str, **kwargs: object):
+                self.calls.append(kwargs)
+                segment = Segment(
+                    8,
+                    21,
+                    "neighbor recovered words neighbor",
+                    [
+                        Word(9.0, 9.5, "neighbor"),
+                        Word(10.5, 11.0, " recovered"),
+                        Word(11.0, 12.0, " words"),
+                        Word(20.2, 20.8, " neighbor"),
+                    ],
+                )
+                return iter([segment]), object()
+
+        model = RecoveryModel()
+        original = [Cue(0, 10, "Before"), Cue(20, 25, "After")]
+        gaps = [GapReview(1, 2, 10, 20, 0, 10, "check_content")]
+        merged, items = recover_suspicious_gaps(
+            model,
+            "audio.wav",
+            original,
+            gaps,
+            minimum_coverage_ratio=0.1,
+        )
+
+        self.assertEqual(
+            [cue.english for cue in merged], ["Before", "recovered words", "After"]
+        )
+        self.assertEqual(len(items), 1)
+        self.assertIsNone(model.calls[0]["no_speech_threshold"])
+        self.assertEqual(model.calls[0]["clip_timestamps"], [8.5, 22.0])
 
     def test_faster_whisper_is_imported_only_when_transcribing(self) -> None:
         fake_segment = Segment(
@@ -169,6 +242,7 @@ class SubtitleTests(unittest.TestCase):
                 device="cpu",
                 compute_type="int8",
                 initial_prompt="Liverpool FC",
+                hotwords="Szoboszlai, Liverpool",
             )
 
         self.assertEqual(cues[0].english, "Hello Liverpool fans!")
@@ -176,6 +250,14 @@ class SubtitleTests(unittest.TestCase):
         self.assertEqual(FakeModel.init_args, (("small.en",), {"device": "cpu", "compute_type": "int8"}))
         self.assertEqual(FakeModel.transcribe_options["word_timestamps"], True)
         self.assertEqual(FakeModel.transcribe_options["initial_prompt"], "Liverpool FC")
+        self.assertEqual(
+            FakeModel.transcribe_options["hotwords"], "Szoboszlai, Liverpool"
+        )
+        self.assertFalse(FakeModel.transcribe_options["condition_on_previous_text"])
+        self.assertEqual(
+            FakeModel.transcribe_options["vad_parameters"]["threshold"], 0.35
+        )
+        self.assertEqual(info["model"], "small.en")
 
 
 if __name__ == "__main__":

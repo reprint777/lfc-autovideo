@@ -17,6 +17,7 @@ class ConfigTests(unittest.TestCase):
             config = load_config(path)
         self.assertEqual(config["transcription"]["model"], "medium.en")
         self.assertEqual(config["transcription"]["language"], "en")
+        self.assertTrue(config["transcription"]["gap_recovery"])
         self.assertIn("render", config)
 
     def test_invalid_json_is_user_facing(self) -> None:
