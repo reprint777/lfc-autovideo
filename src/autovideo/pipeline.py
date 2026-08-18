@@ -414,25 +414,34 @@ def render_job(
             ),
         )
         try:
-            cues = read_translation_csv(translation_path)
+            sheet_cues = read_translation_csv(translation_path)
         except FileNotFoundError as exc:
             raise AutovideoError(f"找不到人工翻译文件：{translation_path}") from exc
         except ValueError as exc:
             raise AutovideoError(str(exc)) from exc
 
         expected_count = manifest.get("transcription", {}).get("cue_count")
-        if isinstance(expected_count, int) and len(cues) != expected_count:
+        if isinstance(expected_count, int) and len(sheet_cues) != expected_count:
             raise AutovideoError(
-                f"translation.csv 应有 {expected_count} 行字幕，实际为 {len(cues)} 行。"
-                "请恢复 prepare 生成的原始行数，只编辑 chinese 列。"
+                f"translation.csv 应有 {expected_count} 行字幕，实际为 {len(sheet_cues)} 行。"
+                "请恢复 prepare 生成的原始行数，不要删除或重排字幕行。"
             )
         expected_digest = manifest.get("transcription", {}).get("cue_timeline_sha256")
-        if isinstance(expected_digest, str) and cue_timeline_digest(cues) != expected_digest:
+        if (
+            isinstance(expected_digest, str)
+            and cue_timeline_digest(sheet_cues) != expected_digest
+        ):
             raise AutovideoError(
                 "translation.csv 的序号或时间轴已被修改。"
                 "请恢复 prepare 生成的时间轴；english 和 chinese 列都允许编辑。"
             )
 
+        cues = [
+            cue
+            for cue in sheet_cues
+            if cue.english.strip() or cue.chinese.strip()
+        ]
+        skipped = len(sheet_cues) - len(cues)
         missing = sum(1 for cue in cues if cue.english.strip() and not cue.chinese.strip())
         if missing and not allow_missing_chinese:
             failure_state = "waiting_for_translation"
@@ -467,7 +476,9 @@ def render_job(
         )
         manifest["paths"]["final_video"] = relative_to_job(job_dir, output_path)
         manifest["translation"] = {
-            "cue_count": len(cues),
+            "cue_count": len(sheet_cues),
+            "rendered_cue_count": len(cues),
+            "skipped_cue_count": skipped,
             "missing_chinese": missing,
         }
         set_state(job_dir, manifest, "completed")

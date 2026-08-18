@@ -30,7 +30,8 @@ index,start,end,english,chinese
 
 请不要修改 `index`、`start`、`end` 或表头，也不要增删行；`english` 可用于修正人名、
 拼写和标点，`chinese` 用于填写对应中文。CSV 文本内如有逗号，应让表格软件自动保留
-引号转义。
+引号转义。如果确认某条自动补录是误识别，把该行的 `english` 和 `chinese` 同时清空，
+渲染时会保留时间轴校验但跳过该条。
 
 ## macOS Apple Silicon 安装
 

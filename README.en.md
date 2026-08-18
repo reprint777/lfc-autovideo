@@ -42,7 +42,9 @@ index,start,end,english,chinese
 Do not modify the header or the `index`, `start`, or `end` columns. Do not add,
 delete, or reorder rows. You may correct names, spelling, and punctuation in
 `english`, and enter the translation in `chinese`. Let your spreadsheet
-application preserve CSV quoting around text containing commas.
+application preserve CSV quoting around text containing commas. To reject a
+false automatic recovery, clear both `english` and `chinese` on that row; the
+renderer keeps timeline validation but omits that cue.
 
 ## macOS Apple Silicon installation
 

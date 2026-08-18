@@ -80,6 +80,14 @@ class SubtitleTests(unittest.TestCase):
         self.assertTrue(raw.startswith(b"\xef\xbb\xbf"))
         self.assertEqual(loaded, original)
 
+    def test_translation_csv_allows_blank_text_to_disable_a_cue(self) -> None:
+        original = [Cue(0, 1, "")]
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "translation.csv"
+            write_translation_csv(original, output)
+            loaded = read_translation_csv(output)
+        self.assertEqual(loaded, original)
+
     def test_translation_csv_rejects_extra_columns_and_missing_indices(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "translation.csv"

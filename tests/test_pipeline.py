@@ -132,6 +132,40 @@ class PipelineTests(unittest.TestCase):
                 render_job(job_dir)
             self.assertEqual(load_job(job_dir)["state"], "translation_needs_attention")
 
+    def test_render_skips_rows_with_both_languages_blank(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = load_config()
+            job_dir, manifest = create_job(
+                root / "jobs", "input.mp4", rights_confirmed=True, config=config
+            )
+            source = job_dir / "source" / "input.mp4"
+            source.write_bytes(b"video")
+            csv_path = job_dir / "subtitles" / "translation.csv"
+            sheet = [Cue(0, 1, ""), Cue(1, 2, "Keep", "保留")]
+            write_translation_csv(sheet, csv_path)
+            manifest["paths"] = {
+                "source_video": relative_to_job(job_dir, source),
+                "translation_csv": relative_to_job(job_dir, csv_path),
+            }
+            manifest["transcription"] = {
+                "cue_count": 2,
+                "cue_timeline_sha256": cue_timeline_digest(sheet),
+            }
+            save_job(job_dir, manifest)
+
+            def fake_render(_source, _ass, output, _config):
+                Path(output).write_bytes(b"rendered")
+                return Path(output)
+
+            with patch("autovideo.pipeline.render_video", side_effect=fake_render):
+                _, rendered, _ = render_job(job_dir)
+
+            self.assertEqual(rendered["translation"]["skipped_cue_count"], 1)
+            subtitle = (job_dir / "subtitles" / "subtitle.bilingual.srt").read_text()
+            self.assertNotIn("00:00:00,000", subtitle)
+            self.assertIn("保留", subtitle)
+
     def test_retranscribe_reuses_audio_and_backs_up_previous_subtitles(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

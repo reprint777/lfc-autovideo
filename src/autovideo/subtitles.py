@@ -233,10 +233,6 @@ def read_translation_csv(path: str | Path) -> list[Cue]:
                 )
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"invalid translation CSV row {row_number}: {exc}") from exc
-            if not cue.english.strip():
-                raise ValueError(
-                    f"invalid translation CSV row {row_number}: english must not be empty"
-                )
             if cues and cue.start < cues[-1].start:
                 raise ValueError(
                     f"invalid translation CSV row {row_number}: timestamps are out of order"
