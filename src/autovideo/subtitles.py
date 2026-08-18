@@ -122,9 +122,9 @@ def write_bilingual_srt(cues: Iterable[Cue], path: str | Path) -> Path:
 def write_translation_csv(cues: Iterable[Cue], path: str | Path) -> Path:
     """Write a spreadsheet-friendly manual translation template.
 
-    Only the ``chinese`` column is intended to be edited.  Timestamps are kept
-    in an unambiguous SRT form and multiline/comma-containing text is safely
-    quoted by :mod:`csv`.
+    The ``english`` column may be corrected and ``chinese`` may be translated.
+    Timestamps are kept in an unambiguous SRT form and multiline/comma-containing
+    text is safely quoted by :mod:`csv`.
     """
 
     destination = _prepare_output(path)
@@ -166,6 +166,21 @@ def cue_source_digest(cues: Iterable[Cue]) -> str:
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode("utf-8")
+    return hashlib.sha256(serialized).hexdigest()
+
+
+def cue_timeline_digest(cues: Iterable[Cue]) -> str:
+    """Hash cue indices and timestamps while allowing manual English corrections."""
+
+    payload = [
+        {
+            "index": index,
+            "start": format_srt_timestamp(cue.start),
+            "end": format_srt_timestamp(cue.end),
+        }
+        for index, cue in enumerate(_coerce_cues(cues), start=1)
+    ]
+    serialized = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(serialized).hexdigest()
 
 

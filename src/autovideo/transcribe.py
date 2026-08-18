@@ -19,6 +19,7 @@ _NO_SPACE_BEFORE = re.compile(r"^[,.;:!?%\]\)}’”]+")
 _CONTRACTION = re.compile(r"^(?:['’](?:s|d|m|re|ve|ll)|n['’]t)$", re.IGNORECASE)
 _SENTENCE_END = re.compile(r"[.!?…][\"'’”\])}]*$")
 _SOFT_END = re.compile(r"[,;:][\"'’”\])}]*$")
+_BROKEN_COMPOUND_HYPHEN = re.compile(r"(?<=[A-Za-z0-9])\s+-(?=[A-Za-z0-9])")
 
 
 def _value(item: object, name: str, default: Any = None) -> Any:
@@ -41,6 +42,12 @@ def _append_word(text: str, raw_word: object) -> str:
     if text.endswith(("-", "—", "/", "(", "[", "{", "‘", "“")):
         return text + word
     return text + " " + word
+
+
+def normalize_transcript_text(text: str) -> str:
+    """Repair spacing artifacts without changing real punctuation dashes."""
+
+    return _BROKEN_COMPOUND_HYPHEN.sub("-", str(text).strip())
 
 
 def build_cues_from_words(
@@ -71,7 +78,7 @@ def build_cues_from_words(
 
     def flush() -> None:
         nonlocal current_text, current_start, current_end, current_count
-        text = current_text.strip()
+        text = normalize_transcript_text(current_text)
         if (
             text
             and current_start is not None
@@ -159,12 +166,12 @@ def cues_from_segments(
             for word in words
             if _value(word, "start") is not None and _value(word, "end") is not None
         ]
-        if timed_words:
+        if words and len(timed_words) == len(words):
             pending_words.extend(timed_words)
             continue
 
         flush_words()
-        text = str(_value(segment, "text", "") or "").strip()
+        text = normalize_transcript_text(str(_value(segment, "text", "") or ""))
         start = _value(segment, "start")
         end = _value(segment, "end")
         if text and start is not None and end is not None:
@@ -197,13 +204,18 @@ def _info_to_dict(info: object) -> dict[str, object]:
 
 def transcribe_local(
     audio_path: str | Path,
-    model_size: str = "small.en",
+    model_size: str = "medium.en",
     device: str = "auto",
     compute_type: str = "default",
     language: str | None = "en",
     initial_prompt: str | None = None,
     beam_size: int = 5,
     vad_filter: bool = True,
+    vad_threshold: float = 0.35,
+    vad_min_silence_duration_ms: int = 2000,
+    vad_speech_pad_ms: int = 600,
+    condition_on_previous_text: bool = False,
+    hotwords: str | None = None,
     max_chars: int = 84,
     max_duration: float = 6.0,
 ) -> tuple[list[Cue], dict[str, object]]:
@@ -226,11 +238,20 @@ def transcribe_local(
         "word_timestamps": True,
         "vad_filter": bool(vad_filter),
         "beam_size": int(beam_size),
+        "condition_on_previous_text": bool(condition_on_previous_text),
     }
+    if vad_filter:
+        options["vad_parameters"] = {
+            "threshold": float(vad_threshold),
+            "min_silence_duration_ms": int(vad_min_silence_duration_ms),
+            "speech_pad_ms": int(vad_speech_pad_ms),
+        }
     if language:
         options["language"] = language
     if initial_prompt:
         options["initial_prompt"] = initial_prompt
+    if hotwords:
+        options["hotwords"] = str(hotwords)
 
     segments, info = model.transcribe(str(Path(audio_path).expanduser()), **options)
     cues = cues_from_segments(
@@ -238,4 +259,17 @@ def transcribe_local(
         max_chars=int(max_chars),
         max_duration=float(max_duration),
     )
-    return cues, _info_to_dict(info)
+    metadata = _info_to_dict(info)
+    metadata.update(
+        {
+            "model": str(model_size),
+            "device": str(device),
+            "compute_type": str(compute_type),
+            "beam_size": int(beam_size),
+            "vad_filter": bool(vad_filter),
+            "condition_on_previous_text": bool(condition_on_previous_text),
+        }
+    )
+    if vad_filter:
+        metadata["vad_parameters"] = dict(options["vad_parameters"])
+    return cues, metadata

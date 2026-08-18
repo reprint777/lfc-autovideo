@@ -18,7 +18,7 @@ Whisper 模型；模型下载完成后，语音识别推理在本机执行。You
 
 1. `autovideo doctor` 检查 Python、FFmpeg 和运行依赖。
 2. `autovideo prepare` 接收 YouTube URL 或本地视频，准备素材并在本机转写英文。
-3. 打开 `jobs/<任务ID>/subtitles/translation.csv`，只编辑 `chinese` 列并保存。
+3. 检查 `transcription.review.csv`，再打开 `translation.csv` 校正英文并填写中文。
 4. `autovideo render` 生成中英双语字幕及压制字幕的 MP4。
 5. 人工检查字幕、授权和投稿信息后，手动上传 Bilibili。
 
@@ -28,8 +28,9 @@ Whisper 模型；模型下载完成后，语音识别推理在本机执行。You
 index,start,end,english,chinese
 ```
 
-请不要修改 `index`、`start`、`end`、`english` 或表头，也不要增删行；只在同一行的
-`chinese` 单元格中填写对应中文。CSV 文本内如有逗号，应让表格软件自动保留引号转义。
+请不要修改 `index`、`start`、`end` 或表头，也不要增删行；`english` 可用于修正人名、
+拼写和标点，`chinese` 用于填写对应中文。CSV 文本内如有逗号，应让表格软件自动保留
+引号转义。
 
 ## macOS Apple Silicon 安装
 
@@ -85,8 +86,8 @@ source .venv/bin/activate
 autovideo init-config config.json
 ```
 
-默认 `small.en` 模型在速度、内存和英文识别质量之间较均衡。可在 `config.json` 中改成
-`tiny.en`（更快、质量较低）、`medium.en`（更慢、质量更高）等。首次使用新模型时会从
+默认 `medium.en` 模型优先保证英文人名和足球术语的识别质量。可在 `config.json` 中改成
+`small.en`（更快、质量较低）或其他兼容模型。首次使用新模型时会从
 Hugging Face 下载模型并写入用户缓存；这不是云端转写，下载结束后的推理仍全部在本地。
 
 ## 使用
@@ -123,11 +124,12 @@ autovideo --config config.json prepare --confirm-rights "/absolute/path/to/video
 FFmpeg 负责读取。
 
 若只想针对本次任务覆盖转写配置，可给 `prepare` 传入 `--model`、`--device`、
-`--compute-type` 或 `--jobs-dir`。例如：
+`--compute-type`、`--hotwords`、`--no-vad` 或 `--jobs-dir`。例如：
 
 ```bash
 autovideo --config config.json prepare --confirm-rights --model medium.en \
-  --device cpu --compute-type int8 "/absolute/path/to/video.mp4"
+  --device cpu --compute-type int8 \
+  --hotwords "Szoboszlai, Wirtz, Liverpool, Anfield" "/absolute/path/to/video.mp4"
 ```
 
 `prepare` 完成时会打印任务 ID 和任务目录。接着编辑：
@@ -143,6 +145,27 @@ index,start,end,english,chinese
 1,"00:00:00,000","00:00:03,240","Welcome back to the channel.","欢迎回到我们的频道。"
 2,"00:00:03,240","00:00:06,800","Liverpool were excellent today.","利物浦今天表现非常出色。"
 ```
+
+同时检查 `transcription.review.csv`：`check_content` 表示字幕空档中仍有明显声音，应回听；
+`likely_silence` 通常是真实停顿。报告只是校对提示，不会自动捏造或插入文字。
+
+### 复用已有音频重新转写
+
+旧任务或存在漏识别的任务无需重新下载视频：
+
+```bash
+autovideo retranscribe --model medium.en \
+  --hotwords "Szoboszlai, Wirtz, Liverpool, Anfield" "jobs/<任务ID>"
+```
+
+如果空档报告确认有声内容仍被跳过，可关闭 VAD 再试：
+
+```bash
+autovideo retranscribe --no-vad "jobs/<任务ID>"
+```
+
+每次重新转写前，现有字幕会自动复制到 `subtitles/backups/<时间>/`，不会直接丢失已完成的
+英文校对或中文翻译。关闭 VAD 可能带来静音段幻觉，因此只建议用于漏识别任务并人工复核。
 
 ### 生成双语成片
 
@@ -174,11 +197,13 @@ jobs/
     │   ├── video.<扩展名>       # 复制的本地文件，或下载的视频
     │   └── info.json           # 输入来源元数据
     ├── audio/
-    │   └── speech.m4a          # 供转写使用的音频
+    │   └── speech.wav          # 供转写使用的无损 PCM 音频
     ├── job.json                # 任务状态、配置和相对路径记录
     ├── subtitles/
     │   ├── transcript.en.srt       # 英文转写字幕
-    │   ├── translation.csv         # 手工填写 chinese 列
+    │   ├── translation.csv         # 校正 english 并填写 chinese
+    │   ├── transcription.review.csv # 非静音字幕空档检查
+    │   ├── backups/                # 重新转写前的字幕备份
     │   ├── subtitle.bilingual.srt  # 可编辑双语字幕
     │   └── subtitle.bilingual.ass  # 用于排版/压制的双语字幕
     └── output/
@@ -203,9 +228,14 @@ jobs/
 - `transcription.compute_type`：默认 `int8`，降低内存占用。
 - `transcription.language`：固定英文识别时使用 `en`。
 - `transcription.beam_size`：增大可能改善结果，但会增加耗时。
-- `transcription.vad_filter`：过滤长静音片段。
+- `transcription.condition_on_previous_text`：默认关闭，减少重复循环和时间戳漂移。
+- `transcription.vad_filter`：过滤长静音片段；有漏识别时可用 `--no-vad` 重试。
+- `transcription.vad_threshold` / `vad_min_silence_duration_ms` /
+  `vad_speech_pad_ms`：控制 VAD 灵敏度与语音边缘保留范围。
+- `transcription.hotwords`：每期可更新的球员、教练和俱乐部英文专名。
 - `transcription.initial_prompt`：帮助识别利物浦相关专名的英文上下文提示。
 - `transcription.max_chars` / `max_duration`：字幕拆分的最大字符数和时长。
+- `transcription.review_*`：空档报告的最短空档和静音检测参数。
 - `subtitles`：双语字幕字体、两种语言的字号、边距、描边和阴影。
 - `render`：FFmpeg 视频编码器、预设、CRF 质量和音频码率。CRF 越低通常质量越高、
   文件越大。
@@ -266,6 +296,12 @@ autovideo doctor
 
 检查每一行 `chinese` 是否都已填写，特别留意表格末尾和只有语气词的短行。不要删除该行。
 如果确实要让部分字幕只显示英文，请保持该格为空，并使用 `--allow-missing-chinese` 渲染。
+
+### 明明有说话但字幕跳过一段
+
+先查看 `transcription.review.csv` 中的 `check_content` 行并回听对应时间。确认漏识别后运行
+`autovideo retranscribe --no-vad "jobs/<任务ID>"`；如果只有专名错误，优先保留 VAD 并用
+`--hotwords` 加入当期球员姓名。重新转写后仍须人工从头检查，尤其是背景音乐和多人重叠语音。
 
 ### 字幕样式正确但画面质量或文件体积不合适
 
